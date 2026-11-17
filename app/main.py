@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, create_engine, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, create_engine, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./haven.db")
@@ -200,7 +200,7 @@ def seed_demo():
         residents=[]
         for name,phone,room_no,bed,rent,deposit in people:
             room=next(r for r in rooms if r.number==room_no)
-            resident=Resident(property_id=prop.id,room_id=room.id,name=name,phone=phone,room_id=room.id,bed_label=bed,monthly_rent=rent,deposit=deposit,joined_on="2026-08-01",due_day=5,status="active")
+            resident=Resident(property_id=prop.id,room_id=room.id,name=name,phone=phone,bed_label=bed,monthly_rent=rent,deposit=deposit,joined_on="2026-08-01",due_day=5,status="active")
             db.add(resident); residents.append(resident)
         db.flush()
         for i,r in enumerate(residents[:7]):
@@ -249,7 +249,7 @@ def home():
 
 @app.get("/api/health")
 def health(db: Session = Depends(get_db)):
-    db.execute(func.now().select())
+    db.execute(text("SELECT 1"))
     return {"status":"ok","app":"haven","database":"connected"}
 
 @app.post("/api/auth/login")
@@ -285,10 +285,13 @@ def bootstrap(db: Session = Depends(get_db), user: User = Depends(current_user))
 def list_resource(resource: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     model=RESOURCE_MODELS.get(resource)
     if not model: raise HTTPException(404,"Unknown resource")
-    if user.role=="owner":
-        ids=[p.id for p in db.query(Property.id).filter(Property.owner_id==user.id).all()]
-    else: ids=[user.property_id] if user.property_id else []
-    rows=db.query(model).filter(model.property_id.in_(ids)).all() if ids else []
+    if resource=="properties":
+        rows=db.query(Property).filter(Property.owner_id==user.id).all() if user.role=="owner" else db.query(Property).filter(Property.id==user.property_id).all()
+    else:
+        if user.role=="owner":
+            ids=[p.id for p in db.query(Property.id).filter(Property.owner_id==user.id).all()]
+        else: ids=[user.property_id] if user.property_id else []
+        rows=db.query(model).filter(model.property_id.in_(ids)).all() if ids else []
     return [{c.name:getattr(row,c.name) for c in model.__table__.columns if c.name not in READ_ONLY_FIELDS} | {"id":row.id} for row in rows]
 
 @app.post("/api/{resource}")
@@ -303,7 +306,7 @@ def create_resource(resource: str, payload: dict[str,Any], db: Session=Depends(g
     else:
         property_access(db,user,property_id)
         payload["property_id"]=property_id
-    allowed={c.name for c in model.__table__.columns}-{ "id","created_at","owner_id"}
+    allowed={c.name for c in model.__table__.columns}-{ "id","created_at"}
     values={k:v for k,v in payload.items() if k in allowed}
     row=model(**values)
     db.add(row); db.commit(); db.refresh(row)
@@ -316,7 +319,10 @@ def update_resource(resource: str, item_id: int, payload: dict[str,Any], db: Ses
     if not model: raise HTTPException(404,"Unknown resource")
     row=db.get(model,item_id)
     if not row: raise HTTPException(404,"Record not found")
-    property_access(db,user,row.id if resource=="properties" else row.property_id) if resource=="properties" else property_access(db,user,row.property_id)
+    if resource=="properties":
+        if user.role!="owner" or row.owner_id!=user.id: raise HTTPException(404,"Property not found")
+    else:
+        property_access(db,user,row.property_id)
     allowed={c.name for c in model.__table__.columns}-{ "id","created_at","owner_id","property_id"}
     for key,value in payload.items():
         if key in allowed: setattr(row,key,value)
@@ -330,7 +336,10 @@ def delete_resource(resource: str, item_id: int, db: Session=Depends(get_db), us
     if not model: raise HTTPException(404,"Unknown resource")
     row=db.get(model,item_id)
     if not row: raise HTTPException(404,"Record not found")
-    property_access(db,user,row.id if resource=="properties" else row.property_id) if resource=="properties" else property_access(db,user,row.property_id)
+    if resource=="properties":
+        if user.role!="owner" or row.owner_id!=user.id: raise HTTPException(404,"Property not found")
+    else:
+        property_access(db,user,row.property_id)
     db.delete(row); db.commit()
     return {"deleted":True}
 
