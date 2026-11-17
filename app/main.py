@@ -229,7 +229,8 @@ def seed_demo():
     finally:
         db.close()
 
-seed_demo()
+if os.getenv("DEMO_MODE", "true").lower() == "true":
+    seed_demo()
 
 RESOURCE_MODELS = {
     "properties": Property, "rooms": Room, "residents": Resident, "payments": Payment,
